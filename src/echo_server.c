@@ -10,14 +10,14 @@
 
 #define ECHO_PORT 9999
 #define BUF_SIZE 4096
-#define HTTP_400 "HTTP/1.1 400 Bad Request\r\n\r\n"
+#define HTTP_400 "HTTP/1.1 400 Bad request\r\n\r\n"
 #define HTTP_501 "HTTP/1.1 501 Not Implemented\r\n\r\n"
 
 int sock = -1, client_sock = -1;
 char buf[BUF_SIZE];
 
-// 构建 HTTP 响应函数
-char* build_http_response(Request* request, int* response_len) {
+// 构建 HTTP 响应函数 - 简单地回显请求内容
+char* build_http_response(Request* request, char* original_request, int request_len, int* response_len) {
     if (request == NULL) {
         *response_len = strlen(HTTP_400);
         return strdup(HTTP_400);
@@ -31,8 +31,8 @@ char* build_http_response(Request* request, int* response_len) {
         return strdup(HTTP_501);
     }
     
-    // 为 Echo 响应分配内存
-    char* response = (char*)malloc(BUF_SIZE * 2);
+    // 为 Echo 响应分配内存 - 需要足够的空间存放原始请求和响应头
+    char* response = (char*)malloc(request_len + 256);
     if (response == NULL) {
         fprintf(stderr, "内存分配失败\n");
         *response_len = 0;
@@ -40,20 +40,12 @@ char* build_http_response(Request* request, int* response_len) {
     }
     
     // 构建响应头
-    int offset = sprintf(response, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n");
+    int offset = sprintf(response, "HTTP/1.1 200 OK\r\n\r\n");
     
-    // 添加请求信息到响应体
-    offset += sprintf(response + offset, "Method: %s\r\nURI: %s\r\nHTTP Version: %s\r\n\r\n", 
-                     request->http_method, request->http_uri, request->http_version);
+    // 直接回显原始请求内容
+    memcpy(response + offset, original_request, request_len);
+    *response_len = offset + request_len;
     
-    // 添加请求头到响应体
-    for (int i = 0; i < request->header_count; i++) {
-        offset += sprintf(response + offset, "%s: %s\r\n", 
-                         request->headers[i].header_name, 
-                         request->headers[i].header_value);
-    }
-    
-    *response_len = offset;
     return response;
 }
 
@@ -161,6 +153,10 @@ int main(int argc, char *argv[]) {
             
             fprintf(stdout, "接收到数据（共 %d 字节）\n", readret);
             
+            // 保存原始请求内容用于回显
+            char original_request[BUF_SIZE];
+            memcpy(original_request, buf, readret);
+            
             // 解析 HTTP 请求
             Request* request = parse(buf, readret, client_sock);
             
@@ -175,7 +171,7 @@ int main(int argc, char *argv[]) {
                 fprintf(stdout, "请求格式错误，发送 400 Bad Request\n");
             } else {
                 // 解析成功，根据请求方法构建响应
-                response = build_http_response(request, &response_len);
+                response = build_http_response(request, original_request, readret, &response_len);
                 
                 if (response == NULL) {
                     fprintf(stderr, "构建响应失败\n");
