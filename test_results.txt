@@ -1,0 +1,14 @@
+Testing Echo Web Server
+=======================
+
+Test 1: GET request
+
+Test 2: HEAD request
+
+Test 3: POST request
+
+Test 4: DELETE request (should return 501)
+
+Test 5: Bad request format (should return 400)
+
+All tests completed

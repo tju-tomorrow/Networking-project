@@ -96,7 +96,7 @@ Request *parsing_request;
 %type<str> token
 %type<str> text
 
-%type<str> method
+
 
 %%
 

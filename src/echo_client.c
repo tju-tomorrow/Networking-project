@@ -93,9 +93,14 @@ void send_http_request(int sock, HttpMethod method, const char* uri, const char*
 
 int main(int argc, char* argv[])
 {
-    if (argc != 3)
+    if (argc < 4)
     {
-        fprintf(stderr, "用法: %s <服务器IP> <端口>\n", argv[0]);
+        fprintf(stderr, "用法: %s <服务器IP> <端口> <方法> [URI] [请求体]\n", argv[0]);
+        fprintf(stderr, "方法可以是: GET, HEAD, POST, BAD (发送格式错误的请求), OTHER (发送未实现的方法)\n");
+        fprintf(stderr, "示例:\n");
+        fprintf(stderr, "  %s localhost 9999 GET /\n", argv[0]);
+        fprintf(stderr, "  %s localhost 9999 POST / \"Hello World\"\n", argv[0]);
+        fprintf(stderr, "  %s localhost 9999 BAD\n", argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -113,83 +118,53 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    printf("=== HTTP Echo Client 测试程序 ===\n");
-    printf("1. 测试 GET 请求\n");
-    printf("2. 测试 HEAD 请求\n");
-    printf("3. 测试 POST 请求\n");
-    printf("4. 测试未实现的方法 (501 Not Implemented)\n");
-    printf("5. 测试错误的请求格式 (400 Bad Request)\n");
-    printf("0. 退出\n");
+    // 创建套接字连接
+    if((sock = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol)) == -1)
+    {
+        fprintf(stderr, "创建套接字失败\n");
+        return EXIT_FAILURE;
+    }
     
-    int choice;
-    do {
-        printf("\n请选择测试类型 (0-5): ");
-        scanf("%d", &choice);
-        getchar(); // 消耗换行符
-        
-        if (choice == 0) break;
-        
-        // 创建新的套接字连接
-        if((sock = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol)) == -1)
-        {
-            fprintf(stderr, "创建套接字失败\n");
-            continue;
-        }
-        
-        if (connect(sock, servinfo->ai_addr, servinfo->ai_addrlen) == -1)
-        {
-            fprintf(stderr, "连接失败\n");
-            close(sock);
-            continue;
-        }
-        
-        switch (choice) {
-            case 1: // GET 请求
-                send_http_request(sock, GET, "/", "");
-                break;
-                
-            case 2: // HEAD 请求
-                send_http_request(sock, HEAD, "/", "");
-                break;
-                
-            case 3: { // POST 请求
-                char body[1024];
-                printf("请输入POST请求体: ");
-                fgets(body, sizeof(body), stdin);
-                body[strcspn(body, "\n")] = 0; // 移除换行符
-                send_http_request(sock, POST, "/", body);
-                break;
-            }
-                
-            case 4: // 未实现的方法
-                send_http_request(sock, INVALID_METHOD, "/", "");
-                break;
-                
-            case 5: { // 错误的请求格式
-                const char* bad_request = "这不是一个有效的HTTP请求\r\n";
-                fprintf(stdout, "\n发送无效请求:\n%s\n", bad_request);
-                send(sock, bad_request, strlen(bad_request), 0);
-                
-                // 接收响应
-                char response[BUF_SIZE];
-                int bytes_received = recv(sock, response, BUF_SIZE - 1, 0);
-                
-                if (bytes_received > 0) {
-                    response[bytes_received] = '\0';
-                    fprintf(stdout, "\n接收到响应 (%d 字节):\n%s\n", bytes_received, response);
-                } else {
-                    fprintf(stderr, "接收响应失败\n");
-                }
-                break;
-            }
-                
-            default:
-                printf("无效的选择\n");
-        }
-        
+    if (connect(sock, servinfo->ai_addr, servinfo->ai_addrlen) == -1)
+    {
+        fprintf(stderr, "连接失败\n");
         close(sock);
+        return EXIT_FAILURE;
+    }
+
+    const char* method_str = argv[3];
+    const char* uri = argc > 4 ? argv[4] : "/";
+    const char* body = argc > 5 ? argv[5] : "";
+    
+    if (strcmp(method_str, "GET") == 0) {
+        send_http_request(sock, GET, uri, "");
+    } else if (strcmp(method_str, "HEAD") == 0) {
+        send_http_request(sock, HEAD, uri, "");
+    } else if (strcmp(method_str, "POST") == 0) {
+        send_http_request(sock, POST, uri, body);
+    } else if (strcmp(method_str, "BAD") == 0) {
+        // 发送格式错误的请求
+        const char* bad_request = "这不是一个有效的HTTP请求\r\n";
+        fprintf(stdout, "\n发送无效请求:\n%s\n", bad_request);
+        send(sock, bad_request, strlen(bad_request), 0);
         
-    } while (choice != 0);
+        // 接收响应
+        char response[BUF_SIZE];
+        int bytes_received = recv(sock, response, BUF_SIZE - 1, 0);
+        
+        if (bytes_received > 0) {
+            response[bytes_received] = '\0';
+            fprintf(stdout, "\n接收到响应 (%d 字节):\n%s\n", bytes_received, response);
+        } else {
+            fprintf(stderr, "接收响应失败\n");
+        }
+    } else if (strcmp(method_str, "OTHER") == 0) {
+        send_http_request(sock, INVALID_METHOD, uri, "");
+    } else {
+        fprintf(stderr, "不支持的方法: %s\n", method_str);
+        close(sock);
+        return EXIT_FAILURE;
+    }
 
     freeaddrinfo(servinfo);
     return EXIT_SUCCESS;
