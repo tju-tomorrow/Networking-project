@@ -17,11 +17,11 @@
 #define BUF_SIZE 4096
 #define MAX_HEADER_SIZE 8192
 
-// 响应状态码定义
-#define HTTP_400 "HTTP/1.1 400 Bad request\r\n\r\n"
-#define HTTP_404 "HTTP/1.1 404 Not Found\r\n\r\n"
-#define HTTP_501 "HTTP/1.1 501 Not Implemented\r\n\r\n"
-#define HTTP_505 "HTTP/1.1 505 HTTP Version not supported\r\n\r\n"
+// 响应状态码定义 - 使用完全符合测试平台要求的格式
+#define RESPONSE_400 "HTTP/1.1 400 Bad request\r\n\r\n"
+#define RESPONSE_404 "HTTP/1.1 404 Not Found\r\n\r\n"
+#define RESPONSE_501 "HTTP/1.1 501 Not Implemented\r\n\r\n"
+#define RESPONSE_505 "HTTP/1.1 505 HTTP Version not supported\r\n\r\n"
 
 // 静态文件根目录
 #define STATIC_ROOT "./static_site"
@@ -103,15 +103,15 @@ char* read_file(const char* file_path, int* file_size) {
 char* build_http_response(Request* request, char* original_request, int request_len, int* response_len, int* status_code) {
     if (request == NULL) {
         *status_code = 400; // Bad Request
-        *response_len = strlen(HTTP_400);
-        return strdup(HTTP_400);
+        *response_len = strlen(RESPONSE_400);
+        return strdup(RESPONSE_400);
     }
     
     // 检查 HTTP 版本
     if (!is_supported_http_version(request->http_version)) {
         *status_code = 505; // HTTP Version Not Supported
-        *response_len = strlen(HTTP_505);
-        return strdup(HTTP_505);
+        *response_len = strlen(RESPONSE_505);
+        return strdup(RESPONSE_505);
     }
     
     // 检查 HTTP 方法
@@ -119,8 +119,8 @@ char* build_http_response(Request* request, char* original_request, int request_
         strcmp(request->http_method, "HEAD") != 0 && 
         strcmp(request->http_method, "POST") != 0) {
         *status_code = 501; // Not Implemented
-        *response_len = strlen(HTTP_501);
-        return strdup(HTTP_501);
+        *response_len = strlen(RESPONSE_501);
+        return strdup(RESPONSE_501);
     }
     
     // 处理 POST 请求 - 简单回显
@@ -183,9 +183,11 @@ char* build_http_response(Request* request, char* original_request, int request_
         char* file_content = read_file(file_path, &file_size);
         
         if (file_content == NULL) {
+            log_error("文件不存在: %s", file_path);
             *status_code = 404; // Not Found
-            *response_len = strlen(HTTP_404);
-            return strdup(HTTP_404);
+            // 直接返回静态字符串
+            *response_len = 28; // "HTTP/1.1 404 Not Found\r\n\r\n" 的长度
+            return strdup("HTTP/1.1 404 Not Found\r\n\r\n");
         }
         
         // 获取文件的MIME类型
@@ -246,8 +248,8 @@ char* build_http_response(Request* request, char* original_request, int request_
     
     // 不应该到达这里
     *status_code = 501; // Not Implemented
-    *response_len = strlen(HTTP_501);
-    return strdup(HTTP_501);
+    *response_len = strlen(RESPONSE_501);
+    return strdup(RESPONSE_501);
 }
 
 // 关闭套接字并处理错误的函数
@@ -381,9 +383,9 @@ int main(int argc, char *argv[]) {
             // 检查请求头部大小
             if (readret > MAX_HEADER_SIZE) {
                 log_error("请求头部过大: %d 字节", readret);
-                send(client_sock, HTTP_400, strlen(HTTP_400), 0);
+                send(client_sock, RESPONSE_400, strlen(RESPONSE_400), 0);
                 log_access(inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port), 
-                          "UNKNOWN", "UNKNOWN", "UNKNOWN", 400, strlen(HTTP_400));
+                          "UNKNOWN", "UNKNOWN", "UNKNOWN", 400, strlen(RESPONSE_400));
                 break;
             }
             
@@ -404,7 +406,7 @@ int main(int argc, char *argv[]) {
             
             if (request == NULL) {
                 // 解析失败，发送 400 Bad Request
-                response = strdup(HTTP_400);
+                response = strdup(RESPONSE_400);
                 response_len = strlen(response);
                 status_code = 400;
                 log_error("请求格式错误，发送 400 Bad Request");
