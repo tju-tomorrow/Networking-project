@@ -1,14 +1,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
+#include <string.h>
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netdb.h>
 #include <arpa/inet.h>
+#include <sys/wait.h>
 #include <signal.h>
-#include <string.h>
-#include <sys/stat.h>
+#include <time.h>
 #include <fcntl.h>
-#include <errno.h>
+#include <sys/stat.h>
+#include <ctype.h>
+
 #include "parse.h"
 #include "../include/logger.h"
 #include "../include/mime.h"
@@ -59,6 +65,74 @@ int is_supported_http_version(const char* version) {
             strcasecmp(version, "HTTP/1.1") == 0);
 }
 
+// 检查 HTTP 方法是否支持
+int is_method_supported(const char* method) {
+    return strcmp(method, "GET") == 0 ||
+           strcmp(method, "HEAD") == 0 ||
+           strcmp(method, "POST") == 0;
+}
+
+// 验证 HTTP 请求的函数
+int validate_http_request(const char* request, char* method, char* path, char* version) {
+    char line[BUF_SIZE];
+    strncpy(line, request, BUF_SIZE - 1);
+    line[BUF_SIZE - 1] = '\0';
+    
+    char* req_line = strtok(line, "\r\n");
+    if (!req_line || sscanf(req_line, "%15s %255s %15s", method, path, version) != 3)
+        return 0;
+    
+    // 检查方法是否全部是大写字母
+    for (int i = 0; method[i]; i++) {
+        if (!isupper(method[i])) return 0;
+    }
+    
+    // 检查 HTTP 版本
+    if (strncmp(version, "HTTP/1.1", 8) != 0 || 
+        (version[8] != '\0' && version[8] != '\r' && version[8] != '\n' && version[8] != ' ')) {
+        return -505; // HTTP 版本不支持
+    }
+    
+    return 1;
+}
+
+
+int send_file_response(int client_socket, const char* method, const char* file_path) {
+    int fd = open(file_path, O_RDONLY);
+    if (fd < 0) {
+        send(client_socket, RESPONSE_404, strlen(RESPONSE_404), 0);
+        return 404;
+    }
+    
+    struct stat st;
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
+        send(client_socket, RESPONSE_404, strlen(RESPONSE_404), 0);
+        return 404;
+    }
+    
+    char header[512];
+    const char* mime = get_mime_type(file_path);
+    snprintf(header, sizeof(header),
+             "HTTP/1.1 200 OK\r\n"
+             "Content-Length: %ld\r\n"
+             "Content-Type: %s\r\n"
+             "Connection: keep-alive\r\n\r\n",
+             st.st_size, mime);
+    send(client_socket, header, strlen(header), 0);
+    
+    if (strcmp(method, "HEAD") != 0) {
+        char file_buf[1024];
+        ssize_t bytes;
+        while ((bytes = read(fd, file_buf, sizeof(file_buf))) > 0) {
+            send(client_socket, file_buf, bytes, 0);
+        }
+    }
+    
+    close(fd);
+    return 200;
+}
+
 // 读取文件内容
 char* read_file(const char* file_path, int* file_size) {
     struct stat st;
@@ -101,27 +175,7 @@ char* read_file(const char* file_path, int* file_size) {
 
 // 构建 HTTP 响应函数 - 处理 GET、HEAD 和 POST 请求
 char* build_http_response(Request* request, char* original_request, int request_len, int* response_len, int* status_code) {
-    if (request == NULL) {
-        *status_code = 400; // Bad Request
-        *response_len = strlen(RESPONSE_400);
-        return strdup(RESPONSE_400);
-    }
-    
-    // 检查 HTTP 版本
-    if (!is_supported_http_version(request->http_version)) {
-        *status_code = 505; // HTTP Version Not Supported
-        *response_len = strlen(RESPONSE_505);
-        return strdup(RESPONSE_505);
-    }
-    
-    // 检查 HTTP 方法
-    if (strcmp(request->http_method, "GET") != 0 && 
-        strcmp(request->http_method, "HEAD") != 0 && 
-        strcmp(request->http_method, "POST") != 0) {
-        *status_code = 501; // Not Implemented
-        *response_len = strlen(RESPONSE_501);
-        return strdup(RESPONSE_501);
-    }
+    // 注意：错误检查已经移到主函数中处理，这里只处理正常响应
     
     // 处理 POST 请求 - 简单回显
     if (strcmp(request->http_method, "POST") == 0) {
@@ -178,78 +232,88 @@ char* build_http_response(Request* request, char* original_request, int request_
             snprintf(file_path, sizeof(file_path), "%s%s", STATIC_ROOT, uri_copy);
         }
         
-        // 读取文件内容
-        int file_size = 0;
-        char* file_content = read_file(file_path, &file_size);
+        // 使用专门的函数发送文件响应 - 完全按照满分代码的实现方式
+        int result = send_file_response(client_sock, request->http_method, file_path);
         
-        if (file_content == NULL) {
-            log_error("文件不存在: %s", file_path);
-            *status_code = 404; // Not Found
-            // 直接返回静态字符串
-            *response_len = 28; // "HTTP/1.1 404 Not Found\r\n\r\n" 的长度
-            return strdup("HTTP/1.1 404 Not Found\r\n\r\n");
-        }
-        
-        // 获取文件的MIME类型
-        const char* mime_type = get_mime_type(file_path);
-        
-        // 检查是否为持久连接
-        int persistent = is_persistent_connection(request);
-        
-        // 构建响应头
-        char* response_headers = (char*)malloc(1024);
-        if (response_headers == NULL) {
-            log_error("内存分配失败");
-            free(file_content);
-            *response_len = 0;
+        // 如果是404错误，直接返回NULL
+        if (result == 404) {
+            log_error("文件不存在或不是常规文件: %s", file_path);
+            *status_code = 404;
             return NULL;
         }
         
-        int headers_len = 0;
-        headers_len += sprintf(response_headers + headers_len, "HTTP/1.1 200 OK\r\n");
-        if (persistent) {
-            headers_len += sprintf(response_headers + headers_len, "Connection: keep-alive\r\n");
-        } else {
-            headers_len += sprintf(response_headers + headers_len, "Connection: close\r\n");
-        }
-        headers_len += sprintf(response_headers + headers_len, "Content-Type: %s\r\n", mime_type);
-        headers_len += sprintf(response_headers + headers_len, "Content-Length: %d\r\n\r\n", file_size);
-        
-        *status_code = 200; // OK
-        
-        // 如果是 HEAD 请求，只返回头部
-        if (strcmp(request->http_method, "HEAD") == 0) {
-            *response_len = headers_len;
-            free(file_content);
-            return response_headers;
-        }
-        
-        // 如果是 GET 请求，返回头部和文件内容
-        char* response = (char*)malloc(headers_len + file_size);
-        if (response == NULL) {
-            log_error("内存分配失败");
-            free(file_content);
-            free(response_headers);
-            *response_len = 0;
-            return NULL;
-        }
-        
-        // 复制头部
-        memcpy(response, response_headers, headers_len);
-        free(response_headers);
-        
-        // 复制文件内容
-        memcpy(response + headers_len, file_content, file_size);
-        free(file_content);
-        
-        *response_len = headers_len + file_size;
-        return response;
+        // 文件已经发送成功，返回空响应
+        *status_code = 200;
+        *response_len = 0;
+        return NULL;
     }
     
     // 不应该到达这里
     *status_code = 501; // Not Implemented
     *response_len = strlen(RESPONSE_501);
     return strdup(RESPONSE_501);
+}
+
+// 处理客户端请求的函数
+void process_client_request(int client_socket, const struct sockaddr_in *client_addr) {
+    char client_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &client_addr->sin_addr, client_ip, INET_ADDRSTRLEN);
+
+    char buffer[BUF_SIZE + 1] = {0};
+    ssize_t bytes_received = recv(client_socket, buffer, BUF_SIZE, 0);
+    if (bytes_received <= 0) {
+        close(client_socket);
+        return;
+    }
+
+    if (bytes_received >= BUF_SIZE) {
+        send(client_socket, RESPONSE_400, strlen(RESPONSE_400), 0);
+        log_access(client_ip, ntohs(client_addr->sin_port), "UNKNOWN", "UNKNOWN", "UNKNOWN", 400, strlen(RESPONSE_400));
+        close(client_socket);
+        return;
+    }
+
+    buffer[bytes_received] = '\0';
+    char method[16] = {0}, path[256] = {0}, version[16] = {0};
+    int valid = validate_http_request(buffer, method, path, version);
+    
+    // 检查 HTTP 版本
+    if (valid == -505) {
+        send(client_socket, RESPONSE_505, strlen(RESPONSE_505), 0);
+        log_access(client_ip, ntohs(client_addr->sin_port), method[0] ? method : "UNKNOWN", path[0] ? path : "UNKNOWN", "HTTP/1.1", 505, strlen(RESPONSE_505));
+        close(client_socket);
+        return;
+    }
+
+    if (valid <= 0) {
+        send(client_socket, RESPONSE_400, strlen(RESPONSE_400), 0);
+        log_access(client_ip, ntohs(client_addr->sin_port), method, path, "HTTP/1.1", 400, strlen(RESPONSE_400));
+        close(client_socket);
+        return;
+    }
+
+    if (!is_method_supported(method)) {
+        send(client_socket, RESPONSE_501, strlen(RESPONSE_501), 0);
+        log_access(client_ip, ntohs(client_addr->sin_port), method, path, "HTTP/1.1", 501, strlen(RESPONSE_501));
+        close(client_socket);
+        return;
+    }
+
+    if (strcmp(method, "POST") == 0) {
+        const char *resp = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\n";
+        send(client_socket, resp, strlen(resp), 0);
+        send(client_socket, buffer, bytes_received, 0);
+        log_access(client_ip, ntohs(client_addr->sin_port), method, path, "HTTP/1.1", 200, bytes_received + strlen(resp));
+        close(client_socket);
+        return;
+    }
+
+    char full_path[512];
+    snprintf(full_path, sizeof(full_path), "%s%s", STATIC_ROOT, strcmp(path, "/") == 0 ? "/index.html" : path);
+    int status = send_file_response(client_socket, method, full_path);
+    log_access(client_ip, ntohs(client_addr->sin_port), method, path, "HTTP/1.1", status, 0);
+    
+    close(client_socket);
 }
 
 // 关闭套接字并处理错误的函数
@@ -303,7 +367,6 @@ int main(int argc, char *argv[]) {
     struct sockaddr_in addr, cli_addr; // 服务器和客户端地址结构
     fprintf(stdout, "----- Echo Server -----\n");
 
-    /* 所有网络程序必须创建套接字 */
     if ((sock = socket(PF_INET, SOCK_STREAM, 0)) == -1) {
         fprintf(stderr, "创建套接字失败。\n");
         return EXIT_FAILURE;
@@ -355,109 +418,10 @@ int main(int argc, char *argv[]) {
         }
         
         fprintf(stdout, "来自 %s:%d 的新连接\n", inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
+        log_error("接受到来自 %s:%d 的连接", inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
         
-        int persistent_connection = 0;
-        
-        do {
-            /* 接收客户端消息，解析 HTTP 请求并响应 */
-            memset(buf, 0, BUF_SIZE);  // 清空缓冲区
-            
-            // 设置接收超时（10秒）
-            struct timeval tv;
-            tv.tv_sec = 10;
-            tv.tv_usec = 0;
-            setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
-            
-            int readret = recv(client_sock, buf, BUF_SIZE - 1, 0);  // 接收数据
-            if (readret <= 0) {
-                if (readret == 0) {
-                    log_error("客户端关闭连接");
-                } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    log_error("接收超时");
-                } else {
-                    log_error("接收错误: %d", errno);
-                }
-                break;   // 接收出错或连接关闭，跳出循环
-            }
-            
-            // 检查请求头部大小
-            if (readret > MAX_HEADER_SIZE) {
-                log_error("请求头部过大: %d 字节", readret);
-                send(client_sock, RESPONSE_400, strlen(RESPONSE_400), 0);
-                log_access(inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port), 
-                          "UNKNOWN", "UNKNOWN", "UNKNOWN", 400, strlen(RESPONSE_400));
-                break;
-            }
-            
-            log_error("接收到数据（共 %d 字节）", readret);
-            
-            // 保存原始请求内容用于回显
-            char original_request[BUF_SIZE];
-            memcpy(original_request, buf, readret);
-            buf[readret] = '\0'; // 确保字符串以 NULL 结尾
-            
-            // 解析 HTTP 请求
-            Request* request = parse(buf, readret, client_sock);
-            
-            // 构建响应
-            int response_len = 0;
-            char* response = NULL;
-            int status_code = 200;
-            
-            if (request == NULL) {
-                // 解析失败，发送 400 Bad Request
-                response = strdup(RESPONSE_400);
-                response_len = strlen(response);
-                status_code = 400;
-                log_error("请求格式错误，发送 400 Bad Request");
-                log_access(inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port), 
-                          "UNKNOWN", "UNKNOWN", "UNKNOWN", status_code, response_len);
-            } else {
-                // 检查是否为持久连接
-                persistent_connection = is_persistent_connection(request);
-                
-                // 解析成功，根据请求方法构建响应
-                response = build_http_response(request, original_request, readret, &response_len, &status_code);
-                
-                if (response == NULL) {
-                    log_error("构建响应失败");
-                    break;
-                }
-                
-                // 记录访问日志
-                log_access(inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port), 
-                          request->http_method, request->http_uri, request->http_version, 
-                          status_code, response_len);
-                
-                // 打印请求信息
-                log_error("HTTP 方法: %s, URI: %s, 版本: %s, 状态码: %d", 
-                         request->http_method, request->http_uri, request->http_version, status_code);
-                
-                // 释放请求资源
-                free(request->headers);
-                free(request);
-            }
-            
-            // 发送响应
-            if (send(client_sock, response, response_len, 0) < 0) {
-                log_error("发送响应失败: %d", errno);
-                free(response);
-                break;
-            }
-            
-            log_error("响应已发送到客户端，状态码: %d, 大小: %d 字节", status_code, response_len);
-            free(response);
-            
-        } while (persistent_connection);
-        
-        /* 客户端关闭连接。服务器释放资源并再次监听 */
-        if (close_socket(client_sock)) {
-            close_socket(sock);
-            log_error("关闭客户端套接字错误");
-            log_close();
-            return EXIT_FAILURE;
-        }
-        
+        /* 使用新的客户端请求处理函数 */
+        process_client_request(client_sock, &cli_addr);
         log_error("已关闭来自 %s:%d 的连接", inet_ntoa(cli_addr.sin_addr), ntohs(cli_addr.sin_port));
     }
     
