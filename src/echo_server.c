@@ -20,7 +20,7 @@
 #include "../include/mime.h"
 
 #define ECHO_PORT 9999
-#define BUF_SIZE 4096
+#define BUFFER_SIZE 4096
 #define MAX_HEADER_SIZE 8192
 
 // 响应状态码定义 - 使用完全符合测试平台要求的格式
@@ -33,7 +33,7 @@
 #define STATIC_ROOT "./static_site"
 
 int sock = -1, client_sock = -1;
-char buf[BUF_SIZE];
+char buf[BUFFER_SIZE];
 
 // 检查是否为持久连接
 int is_persistent_connection(Request* request) {
@@ -74,9 +74,9 @@ int is_method_supported(const char* method) {
 
 // 验证 HTTP 请求的函数
 int validate_http_request(const char* request, char* method, char* path, char* version) {
-    char line[BUF_SIZE];
-    strncpy(line, request, BUF_SIZE - 1);
-    line[BUF_SIZE - 1] = '\0';
+    char line[BUFFER_SIZE];
+    strncpy(line, request, BUFFER_SIZE - 1);
+    line[BUFFER_SIZE - 1] = '\0';
     
     char* req_line = strtok(line, "\r\n");
     if (!req_line || sscanf(req_line, "%15s %255s %15s", method, path, version) != 3)
@@ -96,7 +96,7 @@ int validate_http_request(const char* request, char* method, char* path, char* v
     return 1;
 }
 
-
+// 发送文件响应
 int send_file_response(int client_socket, const char* method, const char* file_path) {
     int fd = open(file_path, O_RDONLY);
     if (fd < 0) {
@@ -115,10 +115,10 @@ int send_file_response(int client_socket, const char* method, const char* file_p
     const char* mime = get_mime_type(file_path);
     snprintf(header, sizeof(header),
              "HTTP/1.1 200 OK\r\n"
-             "Content-Length: %ld\r\n"
+             "Content-Length: %lld\r\n"
              "Content-Type: %s\r\n"
              "Connection: keep-alive\r\n\r\n",
-             st.st_size, mime);
+             (long long)st.st_size, mime);
     send(client_socket, header, strlen(header), 0);
     
     if (strcmp(method, "HEAD") != 0) {
@@ -259,61 +259,65 @@ void process_client_request(int client_socket, const struct sockaddr_in *client_
     char client_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &client_addr->sin_addr, client_ip, INET_ADDRSTRLEN);
 
-    char buffer[BUF_SIZE + 1] = {0};
-    ssize_t bytes_received = recv(client_socket, buffer, BUF_SIZE, 0);
-    if (bytes_received <= 0) {
-        close(client_socket);
-        return;
-    }
+    int client_port = ntohs(client_addr->sin_port);
 
-    if (bytes_received >= BUF_SIZE) {
-        send(client_socket, RESPONSE_400, strlen(RESPONSE_400), 0);
-        log_access(client_ip, ntohs(client_addr->sin_port), "UNKNOWN", "UNKNOWN", "UNKNOWN", 400, strlen(RESPONSE_400));
-        close(client_socket);
-        return;
-    }
+    char buffer[BUFFER_SIZE * 2] = {0};
+    ssize_t total_bytes = 0;
+    int persistent_connection = 1;
 
-    buffer[bytes_received] = '\0';
-    char method[16] = {0}, path[256] = {0}, version[16] = {0};
-    int valid = validate_http_request(buffer, method, path, version);
-    
-    // 检查 HTTP 版本
-    if (valid == -505) {
-        send(client_socket, RESPONSE_505, strlen(RESPONSE_505), 0);
-        log_access(client_ip, ntohs(client_addr->sin_port), method[0] ? method : "UNKNOWN", path[0] ? path : "UNKNOWN", "HTTP/1.1", 505, strlen(RESPONSE_505));
-        close(client_socket);
-        return;
-    }
+    while (persistent_connection) {
+        ssize_t bytes_received = recv(client_socket, buffer + total_bytes, BUFFER_SIZE, 0);
+        if (bytes_received <= 0) {
+            if (bytes_received < 0) {
+                log_error("Failed to receive data from client");
+            }
+            break;
+        }
 
-    if (valid <= 0) {
-        send(client_socket, RESPONSE_400, strlen(RESPONSE_400), 0);
-        log_access(client_ip, ntohs(client_addr->sin_port), method, path, "HTTP/1.1", 400, strlen(RESPONSE_400));
-        close(client_socket);
-        return;
-    }
+        total_bytes += bytes_received;
+        buffer[total_bytes] = '\0';
 
-    if (!is_method_supported(method)) {
-        send(client_socket, RESPONSE_501, strlen(RESPONSE_501), 0);
-        log_access(client_ip, ntohs(client_addr->sin_port), method, path, "HTTP/1.1", 501, strlen(RESPONSE_501));
-        close(client_socket);
-        return;
-    }
+        char *start = buffer;
+        while (1) {
+            char *end = strstr(start, "\r\n\r\n");
+            if (!end) break;
 
-    if (strcmp(method, "POST") == 0) {
-        const char *resp = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\n";
-        send(client_socket, resp, strlen(resp), 0);
-        send(client_socket, buffer, bytes_received, 0);
-        log_access(client_ip, ntohs(client_addr->sin_port), method, path, "HTTP/1.1", 200, bytes_received + strlen(resp));
-        close(client_socket);
-        return;
-    }
+            size_t req_len = end - start + 4;
+            char req[BUFFER_SIZE] = {0};
+            strncpy(req, start, req_len);
 
-    char full_path[512];
-    snprintf(full_path, sizeof(full_path), "%s%s", STATIC_ROOT, strcmp(path, "/") == 0 ? "/index.html" : path);
-    int status = send_file_response(client_socket, method, full_path);
-    log_access(client_ip, ntohs(client_addr->sin_port), method, path, "HTTP/1.1", status, 0);
-    
-    close(client_socket);
+            char method[16] = {0}, path[256] = {0}, version[16] = {0};
+            int valid = validate_http_request(req, method, path, version);
+
+            if (valid == -505) {
+                send(client_socket, RESPONSE_505, strlen(RESPONSE_505), 0);
+                log_access(client_ip, client_port, "UNKNOWN", "UNKNOWN", "HTTP/1.1", 505, 0);
+            } else if (valid == 0) {
+                send(client_socket, RESPONSE_400, strlen(RESPONSE_400), 0);
+                log_access(client_ip, client_port, "UNKNOWN", "UNKNOWN", "HTTP/1.1", 400, 0);
+            } else if (!is_method_supported(method)) {
+                send(client_socket, RESPONSE_501, strlen(RESPONSE_501), 0);
+                log_access(client_ip, client_port, method, path, "HTTP/1.1", 501, 0);
+            } else if (strcmp(method, "POST") == 0) {
+                const char *resp = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\n";
+                send(client_socket, resp, strlen(resp), 0);
+                send(client_socket, req, req_len, 0);
+                log_access(client_ip, client_port, method, path, "HTTP/1.1", 200, req_len);
+            } else {
+                char full_path[512];
+                snprintf(full_path, sizeof(full_path), "%s%s", STATIC_ROOT,
+                         strcmp(path, "/") == 0 ? "/index.html" : path);
+                int status = send_file_response(client_socket, method, full_path);
+                log_access(client_ip, client_port, method, path, "HTTP/1.1", status, 0);
+            }
+
+            start += req_len;
+        }
+
+        size_t remaining = total_bytes - (start - buffer);
+        memmove(buffer, start, remaining);
+        total_bytes = remaining;
+    }
 }
 
 // 关闭套接字并处理错误的函数
@@ -341,6 +345,7 @@ void handle_sigpipe(const int sig) {
     }
     exit(0); // 如果套接字未打开，退出程序
 }
+
 int main(int argc, char *argv[]) {
     /* 初始化日志系统 */
     if (log_init("logs/error.log", "logs/access.log") != 0) {

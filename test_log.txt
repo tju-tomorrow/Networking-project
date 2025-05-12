@@ -1,0 +1,24 @@
+Sending 20 pipelined requests and measuring time...
+Test Results:
+Number of successful responses (200 OK): 20
+Number of 400 errors: 0
+Number of 501 errors: 0
+Number of 505 errors: 0
+Total processing time for 20 requests: 199.0 seconds
+Average time per request: 9.95000000000000000000 seconds
+Sending 20 pipelined requests and measuring time...
+Sending 20 pipelined requests and measuring time...
+Test Results:
+Number of successful responses (200 OK): 20
+Number of 400 errors: 0
+Number of 501 errors: 0
+Number of 505 errors: 0
+Total processing time for 20 requests: 3.0 seconds
+Average time per request: .15000000000000000000 seconds
+Test Results:
+Number of successful responses (200 OK): 20
+Number of 400 errors: 0
+Number of 501 errors: 0
+Number of 505 errors: 0
+Total processing time for 20 requests: 3.0 seconds
+Average time per request: .15000000000000000000 seconds
